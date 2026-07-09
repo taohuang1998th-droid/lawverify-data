@@ -1,0 +1,64 @@
+name: Daily Law Sync
+
+# 每日自动抓取最高法司法解释，更新仓库根目录的 latest_laws.json。
+# 本仓库是公开纯数据仓库：客户端免密钥直读 raw 地址，CI 用自带的
+# GITHUB_TOKEN 提交，全链路没有任何常驻凭据。
+#
+# 退出码约定（sync_court_laws.py）：
+#   0 = 有更新已写出 / 源正常但窗口内无新条文（不写文件）
+#   2 = 数据源故障（网络/页面结构变更/详情页全灭）→ 工作流红 + 邮件报警
+
+on:
+  schedule:
+    - cron: "0 15 * * *"   # 每天 CST 23:00 = UTC 15:00
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: Crawl & Publish Latest Laws
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: cloud_crawler/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r cloud_crawler/requirements.txt
+
+      - name: Run crawler (court.gov.cn)
+        run: python cloud_crawler/sync_court_laws.py
+
+      - name: Publish latest_laws.json if changed
+        run: |
+          # 爬虫仅在抓到条文时写出 cloud_crawler/latest_laws.json；
+          # 没写出（源正常但无新条文）则根目录旧文件保持原样。
+          if [ -f cloud_crawler/latest_laws.json ]; then
+            cp cloud_crawler/latest_laws.json latest_laws.json
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add latest_laws.json
+
+          if git diff --cached --quiet; then
+            echo "ℹ️  latest_laws.json 无变化，跳过提交。"
+            exit 0
+          fi
+
+          PATCH_COUNT=$(jq '.patches | length' latest_laws.json)
+          TODAY=$(date -u +%Y-%m-%d)
+          git commit -m "chore(data): daily sync ${TODAY} [${PATCH_COUNT} patches]"
+          git pull --rebase origin main
+          git push
+          echo "✅ 已发布 ${PATCH_COUNT} 条增量条文（${TODAY}）"
